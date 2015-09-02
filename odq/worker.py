@@ -31,6 +31,9 @@ def get_parser():
     parser.add_argument(
         '--subconcurrency', '-c2', type=int, default=1,
         help='concurrency level of selected sub worker')
+    parser.add_argument(
+        '--queue', '-q', type=str, default='',
+        help='queue to listen on, if not provided, listen on all queues')
     return parser
 
 
@@ -52,13 +55,13 @@ def main():
         from concurrent.futures import ThreadPoolExecutor
         e = ThreadPoolExecutor(args.concurrency)
         for _ in range(args.concurrency):
-            e.submit(run_worker, args.odq, args.worker)
+            e.submit(run_worker, args.odq, args.queue, args.worker)
 
     elif args.worker == 'process':
         from concurrent.futures import ProcessPoolExecutor
         e = ProcessPoolExecutor(args.concurrency)
         for _ in range(args.concurrency):
-            e.submit(run_worker, args.odq, args.worker,
+            e.submit(run_worker, args.odq, args.queue, args.worker,
                      args.subworker, args.subconcurrency)
 
     elif args.worker == 'gevent':
@@ -67,37 +70,47 @@ def main():
         from gevent.pool import Pool
         pool = Pool(args.concurrency)
         for _ in range(args.concurrency):
-            pool.spawn(run_worker, args.odq, args.worker)
+            pool.spawn(run_worker, args.odq, args.queue, args.worker)
         pool.join()
 
 
-def run_worker(odq, worker='thread',
+def run_worker(odq, queue='', worker='thread',
                subworker='', subconcurrency=1, logger=logger):
 
-    def do_work(logger=logger):
+    odqcount = 0
+
+    def do_work(logger=logger, queue=queue):
         # TODO: support batch job execution in single worker
         # this can reduce broker overhead when there's tons of tiny jobs
         import time
         import importlib
+        nonlocal odqcount
+
         path, name = odq.split(':')
         m = importlib.import_module(path)
         o = getattr(m, name)
 
-        queues = []
-        for queue in o.queues:
-            configs = o.configs[queue]
-            max_workers = configs.get('max_workers')
-            if max_workers:
-                if o.num_processing(queue) < max_workers:
+        if queue:
+            queues = [queue]
+        else:
+            queues = []
+            for queue in o.queues:
+                configs = o.configs[queue]
+                max_workers = configs.get('max_workers')
+                if max_workers:
+                    if o.num_processing(queue) < max_workers:
+                        queues.append(queue)
+                else:
                     queues.append(queue)
-            else:
-                queues.append(queue)
 
         while True:
+            queues = queues[1:] + queues[:1]
             results = o.disque_client.get_job(queues)
             for queue, jobid, payload in results:
                 funcname, args, kwargs = loads(payload)
                 func = getattr(m, funcname)
+                odqcount += 1
+                setattr(func, '__odqcount__', odqcount)
                 try:
                     t0 = time.time()
                     result = func.__func__(*args, **kwargs)

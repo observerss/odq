@@ -1,8 +1,12 @@
 """ Task Manager """
-from .client import Client
-
+import time
 import logging
 from pickle import dumps
+
+from crontab import CronTab
+
+from .client import Client
+
 
 logger = logging.getLogger('odq')
 
@@ -54,6 +58,9 @@ class Odq(object):
                         return result
                     return deco
 
+                def run(*args, **kwargs):
+                    return func(*args, **kwargs)
+
                 def inner(*args, **kwargs):
                     config = func.__odq__
                     if config['debug']:
@@ -62,12 +69,18 @@ class Odq(object):
                         queue = config['queue']
                         if queue is None:
                             queue = func.__name__
+                        delay = config.get('delay') or 0
+                        if 'at' in config:
+                            delay += config['at'].timestamp() - time.time()
+                        elif 'cron' in config:
+                            cron = config['cron']
+                            delay += CronTab(cron).next()
                         jobid = self.disque_client.add_job(
                             queue_name=queue,
                             job=dumps([func.__name__, args, kwargs]),
                             timeout=config.get('timeout', 200),
                             replicate=config.get('replicate'),
-                            delay=config.get('delay'),
+                            delay=delay,
                             ttl=config.get('ttl'),
                             retry=config.get('retry'),
                             maxlen=config.get('maxlen'),
@@ -80,6 +93,7 @@ class Odq(object):
                 self.configs[func.__name__] = config
                 setattr(func, '__odq__', config)
                 setattr(inner, 'with_config', with_config)
+                setattr(inner, 'run', run)
                 setattr(inner, '__func__', func)
                 return inner
             return outer
